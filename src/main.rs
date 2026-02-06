@@ -744,9 +744,7 @@ fn click_cards(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cam: Query<(&Camera, &GlobalTransform)>,
-    cards: Query<(&Card, &GlobalTransform)>,
     mut game: ResMut<Game>,
-    qs: Res<Questions>,
     mut sound_events: EventWriter<PlaySoundEvent>,
 ) {
     if game.phase != Phase::Playing || !mouse.just_pressed(MouseButton::Left) {
@@ -766,26 +764,16 @@ fn click_cards(
         return;
     };
 
-    for (card, gt) in cards.iter() {
-        let pos = gt.translation().truncate();
-        let clicked = world.x >= pos.x - CARD_W / 2.0 * HOVER_SCALE
-            && world.x <= pos.x + CARD_W / 2.0 * HOVER_SCALE
-            && world.y >= pos.y - CARD_H / 2.0 * HOVER_SCALE
-            && world.y <= pos.y + CARD_H / 2.0 * HOVER_SCALE;
-
-        if clicked {
-            sound_events.send(PlaySoundEvent(SoundType::Select));
-
-            game.picked = Some(card.choice);
-            match card.choice {
-                Choice::Left => game.score_l += 1,
-                Choice::Right => game.score_r += 1,
-            };
-
-            game.phase = Phase::Picked;
-            game.wait = 0.6;
-        }
-    }
+    let choice = if world.x < 0.0 { Choice::Left } else { Choice::Right };
+    
+    sound_events.send(PlaySoundEvent(SoundType::Select));
+    game.picked = Some(choice);
+    match choice {
+        Choice::Left => game.score_l += 1,
+        Choice::Right => game.score_r += 1,
+    };
+    game.phase = Phase::Picked;
+    game.wait = 0.6;
 }
 
 fn picked_tick(
@@ -841,15 +829,12 @@ fn picked_tick(
     game.wait -= time.delta_secs();
     if game.wait <= 0.0 {
         game.question += 1;
-
         if game.question >= qs.0.len() {
-            game.phase = Phase::Results;
-            sound_events.send(PlaySoundEvent(SoundType::Result));
-        } else {
-            game.phase = Phase::Transition;
-            game.wait = 0.5;
-            sound_events.send(PlaySoundEvent(SoundType::Go));
+            game.question = 0;
         }
+        game.phase = Phase::Transition;
+        game.wait = 0.5;
+        sound_events.send(PlaySoundEvent(SoundType::Go));
     }
 }
 
