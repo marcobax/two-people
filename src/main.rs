@@ -134,48 +134,32 @@ struct Q {
 
 impl Default for Questions {
     fn default() -> Self {
-        Self(vec![
-            Q {
-                title: "There are 2 types of people...",
-                left: "EARLY\nBIRD",
-                left_em: "🌅",
-                right: "NIGHT\nOWL",
-                right_em: "🦉",
-                trait_name: "sleep_schedule",
-            },
-            Q {
-                title: "When the alarm goes off...",
-                left: "SNOOZE\nx100",
-                left_em: "😴",
-                right: "UP &\nAT EM",
-                right_em: "💪",
-                trait_name: "morning_routine",
-            },
-            Q {
-                title: "Your phone battery...",
-                left: "5%\nALWAYS",
-                left_em: "🪫",
-                right: "ALWAYS\n100%",
-                right_em: "🔋",
-                trait_name: "organization",
-            },
-            Q {
-                title: "Texting back takes...",
-                left: "3-5\nDAYS",
-                left_em: "👻",
-                right: "INSTANT\nREPLY",
-                right_em: "⚡",
-                trait_name: "communication",
-            },
-            Q {
-                title: "Friday night = ...",
-                left: "COUCH\nNETFLIX",
-                left_em: "🛋️",
-                right: "OUT\nTILL 4AM",
-                right_em: "🎉",
-                trait_name: "social_life",
-            },
-        ])
+        use rand::seq::SliceRandom;
+        let mut rng = rand::rng();
+        let mut all = vec![
+            Q { title: "There are 2 types of people...", left: "EARLY\nBIRD", left_em: "", right: "NIGHT\nOWL", right_em: "", trait_name: "" },
+            Q { title: "When the alarm goes off...", left: "SNOOZE\nx100", left_em: "", right: "UP &\nAT EM", right_em: "", trait_name: "" },
+            Q { title: "Your phone battery...", left: "5%\nALWAYS", left_em: "", right: "ALWAYS\n100%", right_em: "", trait_name: "" },
+            Q { title: "Texting back takes...", left: "3-5\nDAYS", left_em: "", right: "INSTANT\nREPLY", right_em: "", trait_name: "" },
+            Q { title: "Friday night = ...", left: "COUCH\nNETFLIX", left_em: "", right: "OUT\nTILL 4AM", right_em: "", trait_name: "" },
+            Q { title: "Lights on or off...", left: "LIGHTS\nON", left_em: "", right: "LIGHTS\nOFF", right_em: "", trait_name: "" },
+            Q { title: "Big spoon or...", left: "BIG\nSPOON", left_em: "", right: "LITTLE\nSPOON", right_em: "", trait_name: "" },
+            Q { title: "First date energy...", left: "NERVOUS\nWRECK", left_em: "", right: "MAIN\nCHARACTER", right_em: "", trait_name: "" },
+            Q { title: "Flirting style be like...", left: "EYE\nCONTACT", left_em: "", right: "JUST\nSAY IT", right_em: "", trait_name: "" },
+            Q { title: "When the vibe is off...", left: "GHOST\nTHEM", left_em: "", right: "TALK IT\nOUT", right_em: "", trait_name: "" },
+            Q { title: "Music during...", left: "YES\nALWAYS", left_em: "", right: "SILENCE\nIS GOLD", right_em: "", trait_name: "" },
+            Q { title: "Morning or night...", left: "SUNRISE\nENERGY", left_em: "", right: "AFTER\nDARK", right_em: "", trait_name: "" },
+            Q { title: "They ate your leftovers...", left: "WAR\nCRIME", left_em: "", right: "IT'S JUST\nFOOD", right_em: "", trait_name: "" },
+            Q { title: "Netflix and...", left: "ACTUALLY\nWATCH", left_em: "", right: "WHO'S\nWATCHING", right_em: "", trait_name: "" },
+            Q { title: "Pet names in public...", left: "BABY\nBABE", left_em: "", right: "FIRST\nNAME", right_em: "", trait_name: "" },
+            Q { title: "Thermostat wars...", left: "ARCTIC\nBLAST", left_em: "", right: "SAUNA\nMODE", right_em: "", trait_name: "" },
+            Q { title: "Road trip roles...", left: "DJ &\nNAVIGATOR", left_em: "", right: "DRIVER\nONLY", right_em: "", trait_name: "" },
+            Q { title: "Saying I love you...", left: "EVERY\n5 MIN", left_em: "", right: "WHEN IT\nMATTERS", right_em: "", trait_name: "" },
+            Q { title: "Going to bed angry...", left: "NEVER\nEVER", left_em: "", right: "SLEEP\nON IT", right_em: "", trait_name: "" },
+            Q { title: "Drunk behavior...", left: "CLINGY\nAF", left_em: "", right: "SLEEPY\nQUIET", right_em: "", trait_name: "" },
+        ];
+        all.shuffle(&mut rng);
+        Self(all.into_iter().take(10).collect())
     }
 }
 
@@ -219,6 +203,54 @@ enum SoundType {
     CardIn,
 }
 
+/// Creates a rounded rectangle mesh for cards
+fn create_rounded_rect_mesh(width: f32, height: f32, radius: f32) -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    let r = radius.min(hw).min(hh); // Clamp radius
+    let segments = 8; // Segments per corner
+    
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    
+    // Center vertex
+    positions.push([0.0, 0.0, 0.0]);
+    uvs.push([0.5, 0.5]);
+    
+    // Generate vertices around the rounded rectangle
+    let corners = [
+        (hw - r, hh - r, 0.0),              // Top-right
+        (-hw + r, hh - r, std::f32::consts::FRAC_PI_2),  // Top-left
+        (-hw + r, -hh + r, std::f32::consts::PI),        // Bottom-left
+        (hw - r, -hh + r, std::f32::consts::PI * 1.5),   // Bottom-right
+    ];
+    
+    for (cx, cy, start_angle) in corners {
+        for i in 0..=segments {
+            let angle = start_angle + (i as f32 / segments as f32) * std::f32::consts::FRAC_PI_2;
+            let x = cx + r * angle.cos();
+            let y = cy + r * angle.sin();
+            positions.push([x, y, 0.0]);
+            uvs.push([(x / width) + 0.5, (y / height) + 0.5]);
+        }
+    }
+    
+    // Generate triangle fan indices
+    let num_outer = positions.len() as u32 - 1;
+    for i in 1..=num_outer {
+        let next = if i == num_outer { 1 } else { i + 1 };
+        indices.extend_from_slice(&[0, i, next]);
+    }
+    
+    Mesh::new(PrimitiveTopology::TriangleList, default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
+}
+
 fn main() {
     // Load env vars
     let _ = dotenvy::dotenv();
@@ -230,7 +262,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "TWO PEOPLE - CHOOSE FAST!".into(),
-                resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
+                mode: bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                 ..default()
             }),
             ..default()
@@ -276,7 +308,15 @@ fn setup_audio(mut cmd: Commands, asset_server: Res<AssetServer>) {
     };
     cmd.insert_resource(sounds);
 
-    info!("Audio system initialized");
+    cmd.spawn((
+        AudioPlayer::new(asset_server.load("sounds/music.ogg")),
+        PlaybackSettings {
+            mode: PlaybackMode::Loop,
+            volume: Volume::new(1.0),
+            ..default()
+        },
+        BgMusic,
+    ));
 }
 
 fn setup_db(db_pool: Res<DbPool>, runtime: Res<TokioRuntime>) {
@@ -334,15 +374,15 @@ fn setup(
     // Camera
     cmd.spawn(Camera2d);
 
-    // Title
+    // Title (question text - shown above cards)
     cmd.spawn((
         Text2d::new("TWO PEOPLE"),
         TextFont {
-            font_size: 100.0,
+            font_size: 48.0,
             ..default()
         },
         TextColor(Color::WHITE),
-        Transform::from_xyz(0.0, 100.0, 10.0),
+        Transform::from_xyz(0.0, 250.0, 10.0),
         TitleText,
         Pulse { speed: 3.0 },
     ));
@@ -351,23 +391,23 @@ fn setup(
     cmd.spawn((
         Text2d::new("CHOOSE FAST!"),
         TextFont {
-            font_size: 44.0,
+            font_size: 28.0,
             ..default()
         },
         TextColor(TEXT_YELLOW),
-        Transform::from_xyz(0.0, -20.0, 10.0),
+        Transform::from_xyz(0.0, 200.0, 10.0),
         HurryText,
     ));
 
-    // Timer
+    // Timer (top of screen)
     cmd.spawn((
         Text2d::new("5"),
         TextFont {
-            font_size: 72.0,
+            font_size: 56.0,
             ..default()
         },
         TextColor(TIMER_NORMAL),
-        Transform::from_xyz(0.0, 280.0, 10.0),
+        Transform::from_xyz(0.0, 320.0, 10.0),
         Visibility::Hidden,
         TimerDisplay,
     ));
@@ -386,7 +426,7 @@ fn setup(
     ));
 
     let q = &qs.0[0];
-    let card_mesh = meshes.add(Rectangle::new(CARD_W, CARD_H));
+    let card_mesh = meshes.add(create_rounded_rect_mesh(CARD_W, CARD_H, 25.0));
 
     // Left card
     let lx = -CARD_GAP / 2.0;
@@ -401,7 +441,7 @@ fn setup(
         },
     ));
     cmd.spawn((
-        Text2d::new(format!("{}\n{}", q.left_em, q.left)),
+        Text2d::new(q.left.to_string()),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -427,7 +467,7 @@ fn setup(
         },
     ));
     cmd.spawn((
-        Text2d::new(format!("{}\n{}", q.right_em, q.right)),
+        Text2d::new(q.right.to_string()),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -866,11 +906,10 @@ fn transition_tick(
             t.scale = Vec3::ONE;
             match lbl.choice {
                 Choice::Left => {
-                    txt.0 = format!("{}\n{}", q.left_em, q.left);
-                    t.translation.x = -CARD_GAP / 2.0;
+                    txt.0 = q.left.to_string();
                 }
                 Choice::Right => {
-                    txt.0 = format!("{}\n{}", q.right_em, q.right);
+                    txt.0 = q.right.to_string();
                     t.translation.x = CARD_GAP / 2.0;
                 }
             }
@@ -1002,8 +1041,8 @@ fn handle_replay(
             *vis = Visibility::Visible;
             t.scale = Vec3::ONE;
             match lbl.choice {
-                Choice::Left => txt.0 = format!("{}\n{}", q.left_em, q.left),
-                Choice::Right => txt.0 = format!("{}\n{}", q.right_em, q.right),
+                Choice::Left => txt.0 = q.left.to_string(),
+                Choice::Right => txt.0 = q.right.to_string(),
             }
         }
 
