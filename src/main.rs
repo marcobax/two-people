@@ -75,11 +75,23 @@ struct BgShape {
 struct Pulse {
     speed: f32,
 }
+
+#[derive(Component)]
+struct Firework {
+    vel: Vec2,
+    life: f32,
+    max_life: f32,
+    color_hue: f32,
+}
+
 #[derive(Component)]
 struct ReplayInstruction;
 
 #[derive(Component)]
 struct StatsDisplay;
+
+#[derive(Component)]
+struct UhOhText;
 
 #[derive(Resource, Default)]
 struct DbStats {
@@ -110,6 +122,12 @@ struct Game {
     hovered_card: Option<Choice>,
     results_shown: bool,
     timeouts: i32,
+    streak: i32,
+    used_questions: Vec<usize>,
+    total_reaction_time: f32,
+    answers_count: i32,
+    last_reaction: f32,
+    tremble: f32,
 }
 
 impl Default for Game {
@@ -127,6 +145,12 @@ impl Default for Game {
             hovered_card: None,
             results_shown: false,
             timeouts: 0,
+            streak: 0,
+            used_questions: vec![0],
+            total_reaction_time: 0.0,
+            answers_count: 0,
+            last_reaction: 5.0,
+            tremble: 0.0,
         }
     }
 }
@@ -136,8 +160,9 @@ enum Phase {
     #[default]
     Intro,
     Playing,
-    Picked,      // Card animates to center (0.5s)
-    Transition,  // "GO!" flash before next question (0.5s)
+    Picked,
+    Transition,
+    UhOh,
     Results,
 }
 
@@ -212,6 +237,12 @@ struct TokioRuntime(Runtime);
 // Events for audio playback
 #[derive(Event)]
 struct PlaySoundEvent(SoundType);
+
+#[derive(Event)]
+struct SpawnFireworksEvent {
+    x: f32,
+    intensity: i32,
+}
 
 #[derive(Clone, Copy)]
 enum SoundType {
@@ -297,6 +328,7 @@ fn main() {
         .init_resource::<DbStats>()
         .insert_resource(TokioRuntime(runtime))
         .add_event::<PlaySoundEvent>()
+        .add_event::<SpawnFireworksEvent>()
         .add_systems(Startup, (setup, setup_audio, setup_db))
         .add_systems(
             Update,
@@ -311,10 +343,13 @@ fn main() {
                 update_visuals,
                 animate_particles,
                 animate_bg_shapes,
+                animate_fireworks,
+                spawn_fireworks,
                 animate_pulse,
                 screen_shake,
                 handle_sound_events,
                 handle_replay,
+                uhoh_tick,
             ),
         )
         .run();
@@ -575,6 +610,18 @@ fn setup(
         StatsDisplay,
     ));
 
+    cmd.spawn((
+        Text2d::new("UH OH! TOO SLOW!"),
+        TextFont {
+            font_size: 80.0,
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 0.3, 0.3, 1.0)),
+        Transform::from_xyz(0.0, 0.0, 25.0),
+        Visibility::Hidden,
+        UhOhText,
+    ));
+
     // "GO!" text for transitions (hidden initially)
     cmd.spawn((
         Text2d::new("GO!"),
@@ -709,25 +756,15 @@ fn timer_tick(
 
     if game.timer <= 0.0 {
         game.timeouts += 1;
+        game.streak = 0;
         
         if game.timeouts >= 3 {
             game.phase = Phase::Results;
             sound_events.send(PlaySoundEvent(SoundType::Result));
         } else {
-            let mut rng = rand::rng();
-            game.picked = Some(if rng.random_bool(0.5) {
-                Choice::Left
-            } else {
-                Choice::Right
-            });
-            match game.picked {
-                Some(Choice::Left) => game.score_l += 1,
-                Some(Choice::Right) => game.score_r += 1,
-                None => {}
-            }
-            game.phase = Phase::Picked;
-            game.wait = 1.0;
-            sound_events.send(PlaySoundEvent(SoundType::Click));
+            game.phase = Phase::UhOh;
+            game.wait = 1.2;
+            sound_events.send(PlaySoundEvent(SoundType::Whoosh));
         }
     }
 }
@@ -771,19 +808,29 @@ fn hover_cards(
             new_hover = Some(card.choice);
         }
 
-        let target = if hovered { HOVER_SCALE } else { 1.0 };
-        t.scale = t.scale.lerp(Vec3::splat(target), 12.0 * time.delta_secs());
-
-        // Float animation
-        let bob = (time.elapsed_secs() * 2.0
-            + if card.choice == Choice::Left {
-                0.0
-            } else {
-                std::f32::consts::PI
-            })
-        .sin()
-            * 6.0;
-        t.translation.y = card.base_y + bob;
+        let t_secs = time.elapsed_secs();
+        let progress = game.answers_count as f32 / 10.0;
+        let chaos = (progress + game.tremble * 2.0).min(3.0);
+        let bounce_intensity = 1.0 + chaos * 4.0;
+        let bounce_speed = 2.0 + chaos * 10.0;
+        
+        let base_scale = if hovered { HOVER_SCALE } else { 1.0 };
+        let pulse = 1.0 + (t_secs * (10.0 + chaos * 20.0)).sin().abs() * 0.1 * chaos;
+        t.scale = t.scale.lerp(Vec3::splat(base_scale * pulse), 15.0 * time.delta_secs());
+        let phase_offset = if card.choice == Choice::Left { 0.0 } else { std::f32::consts::PI };
+        let bob = (t_secs * bounce_speed + phase_offset).sin() * 10.0 * bounce_intensity;
+        let side_bob = (t_secs * bounce_speed * 0.7 + phase_offset).cos() * 5.0 * chaos;
+        
+        let tremble_x = (t_secs * 50.0 + phase_offset).sin() * 8.0 * game.tremble;
+        let tremble_y = (t_secs * 55.0).cos() * 6.0 * game.tremble;
+        
+        let spin = (t_secs * bounce_speed * 0.5 + phase_offset).cos() * 0.15 * chaos;
+        let panic_spin = (t_secs * 40.0).sin() * 0.1 * game.tremble;
+        
+        let base_x = if card.choice == Choice::Left { -CARD_GAP / 2.0 } else { CARD_GAP / 2.0 };
+        t.translation.y = card.base_y + bob + tremble_y;
+        t.translation.x = base_x + side_bob + tremble_x;
+        t.rotation = Quat::from_rotation_z(spin + panic_spin);
     }
 
     // Detect hover change and play sound
@@ -811,6 +858,7 @@ fn click_cards(
     cam: Query<(&Camera, &GlobalTransform)>,
     mut game: ResMut<Game>,
     mut sound_events: EventWriter<PlaySoundEvent>,
+    mut firework_events: EventWriter<SpawnFireworksEvent>,
 ) {
     if game.phase != Phase::Playing || !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -831,9 +879,28 @@ fn click_cards(
 
     let choice = if world.x < 0.0 { Choice::Left } else { Choice::Right };
     
+    let reaction_time = QUESTION_TIME - game.timer;
+    game.total_reaction_time += reaction_time;
+    game.answers_count += 1;
+    game.last_reaction = reaction_time;
+    
+    if reaction_time < 0.5 {
+        game.tremble = (game.tremble + 0.3).min(1.0);
+    } else {
+        game.tremble = (game.tremble - 0.1).max(0.0);
+    }
+    
+    let avg_reaction = game.total_reaction_time / game.answers_count as f32;
+    let speed_bonus = ((QUESTION_TIME - avg_reaction) / QUESTION_TIME * 10.0) as i32;
+    
     sound_events.send(PlaySoundEvent(SoundType::Select));
     game.picked = Some(choice);
     game.timeouts = 0;
+    game.streak += 1;
+    
+    let intensity = game.streak + speed_bonus.max(0) + (game.tremble * 5.0) as i32;
+    firework_events.send(SpawnFireworksEvent { x: 0.0, intensity });
+    
     match choice {
         Choice::Left => game.score_l += 1,
         Choice::Right => game.score_r += 1,
@@ -894,10 +961,6 @@ fn picked_tick(
 
     game.wait -= time.delta_secs();
     if game.wait <= 0.0 {
-        game.question += 1;
-        if game.question >= qs.0.len() {
-            game.question = 0;
-        }
         game.phase = Phase::Transition;
         game.wait = 0.5;
         sound_events.send(PlaySoundEvent(SoundType::Go));
@@ -934,10 +997,25 @@ fn transition_tick(
             *v = Visibility::Hidden;
         }
 
+        let mut rng = rand::rng();
+        let available: Vec<usize> = (0..qs.0.len())
+            .filter(|i| !game.used_questions.contains(i))
+            .collect();
+        
+        if available.is_empty() {
+            game.phase = Phase::Results;
+            sound_events.send(PlaySoundEvent(SoundType::Result));
+            return;
+        }
+        
+        let new_question = available[rng.random_range(0..available.len())];
+        game.question = new_question;
+        game.used_questions.push(new_question);
+
         let q = &qs.0[game.question];
         game.phase = Phase::Playing;
         game.timer = QUESTION_TIME;
-        game.last_tick = 5;
+        game.last_tick = QUESTION_TIME as i32;
         game.picked = None;
 
         sound_events.send(PlaySoundEvent(SoundType::CardIn));
@@ -1124,10 +1202,15 @@ fn handle_replay(
         game.hovered_card = None;
         game.results_shown = false;
         game.timeouts = 0;
+        game.streak = 0;
+        game.used_questions = vec![0];
+        game.total_reaction_time = 0.0;
+        game.answers_count = 0;
+        game.last_reaction = 5.0;
+        game.tremble = 0.0;
 
         sound_events.send(PlaySoundEvent(SoundType::CardIn));
 
-        // Reset UI
         let q = &qs.0[0];
 
         for (card, mut vis, mut t) in cards.iter_mut() {
@@ -1176,19 +1259,23 @@ fn handle_replay(
 }
 
 fn update_visuals(
+    time: Res<Time>,
     game: Res<Game>,
     mut timer_q: Query<(&mut Text2d, &mut TextColor, &mut Transform), With<TimerDisplay>>,
-    mut title_q: Query<&mut Visibility, With<TitleText>>,
+    mut title_q: Query<(&mut Visibility, &mut Transform), (With<TitleText>, Without<TimerDisplay>)>,
 ) {
     if game.phase == Phase::Playing {
         let secs = game.timer.ceil() as i32;
         let frac = game.timer.fract();
+        let progress = game.answers_count as f32 / 20.0;
+        let t_secs = time.elapsed_secs();
         
         for (mut txt, mut col, mut t) in timer_q.iter_mut() {
             txt.0 = format!("{}", secs.max(0));
 
             let bam = 1.0 - frac;
             let scale = 0.5 + bam * 1.5;
+            let wobble = (t_secs * 8.0).sin() * 0.03 * progress;
             
             if game.timer <= HURRY_TIME {
                 col.0 = TIMER_HURRY;
@@ -1197,11 +1284,15 @@ fn update_visuals(
                 col.0 = TIMER_NORMAL;
                 t.scale = Vec3::splat(scale);
             }
+            t.rotation = Quat::from_rotation_z(wobble);
         }
 
-        // Show title during play (as question)
-        for mut v in title_q.iter_mut() {
+        for (mut v, mut t) in title_q.iter_mut() {
             *v = Visibility::Visible;
+            let bounce = (t_secs * (3.0 + progress * 3.0)).sin() * 3.0 * (1.0 + progress);
+            let wobble = (t_secs * 5.0).cos() * 0.02 * progress;
+            t.translation.y = 280.0 + bounce;
+            t.rotation = Quat::from_rotation_z(wobble);
         }
     }
 }
@@ -1249,13 +1340,177 @@ fn animate_pulse(time: Res<Time>, mut q: Query<(&mut Transform, &Pulse)>) {
 
 fn screen_shake(game: Res<Game>, mut cam: Query<&mut Transform, With<Camera2d>>) {
     let mut rng = rand::rng();
+    let shake_intensity = (game.streak as f32 * 0.5).min(8.0);
     for mut t in cam.iter_mut() {
-        if game.phase == Phase::Picked && game.wait > 0.8 {
-            t.translation.x = rng.random_range(-4.0..4.0);
-            t.translation.y = rng.random_range(-4.0..4.0);
+        if game.phase == Phase::Picked && game.wait > 0.4 {
+            t.translation.x = rng.random_range(-shake_intensity..shake_intensity);
+            t.translation.y = rng.random_range(-shake_intensity..shake_intensity);
         } else {
             t.translation.x *= 0.85;
             t.translation.y *= 0.85;
         }
+    }
+}
+
+fn spawn_fireworks(
+    mut cmd: Commands,
+    mut events: EventReader<SpawnFireworksEvent>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<ColorMaterial>>,
+) {
+    let mut rng = rand::rng();
+    
+    for event in events.read() {
+        let base_count = 20 + (event.intensity as usize * 15).min(200);
+        let speed_mult = 1.0 + (event.intensity as f32 * 0.2).min(3.0);
+        
+        for _ in 0..base_count {
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
+            let speed = rng.random_range(200.0..800.0) * speed_mult;
+            let size = rng.random_range(4.0..15.0);
+            let hue = rng.random_range(0.0..360.0);
+            let life = rng.random_range(0.5..1.2);
+            
+            let vel = Vec2::new(angle.cos() * speed, angle.sin() * speed);
+            let c = Color::hsla(hue, 1.0, 0.6, 1.0);
+            
+            let mesh = if rng.random_bool(0.5) {
+                meshes.add(Circle::new(size))
+            } else {
+                meshes.add(RegularPolygon::new(size, rng.random_range(3..7)))
+            };
+            
+            cmd.spawn((
+                Mesh2d(mesh),
+                MeshMaterial2d(mats.add(ColorMaterial::from(c))),
+                Transform::from_xyz(event.x, 0.0, 15.0),
+                Firework {
+                    vel,
+                    life,
+                    max_life: life,
+                    color_hue: hue,
+                },
+            ));
+        }
+        
+        for _ in 0..(event.intensity as usize * 5).min(50) {
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
+            let speed = rng.random_range(100.0..400.0) * speed_mult;
+            let size = rng.random_range(8.0..25.0);
+            let hue = rng.random_range(30.0..60.0);
+            let life = rng.random_range(0.8..1.5);
+            
+            let vel = Vec2::new(angle.cos() * speed, angle.sin() * speed + 100.0);
+            let c = Color::hsla(hue, 1.0, 0.7, 1.0);
+            
+            cmd.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(size, 5))),
+                MeshMaterial2d(mats.add(ColorMaterial::from(c))),
+                Transform::from_xyz(event.x, 0.0, 16.0),
+                Firework {
+                    vel,
+                    life,
+                    max_life: life,
+                    color_hue: hue,
+                },
+            ));
+        }
+    }
+}
+
+fn animate_fireworks(
+    mut cmd: Commands,
+    time: Res<Time>,
+    mut fireworks: Query<(Entity, &mut Transform, &mut Firework)>,
+) {
+    let dt = time.delta_secs();
+    let gravity = -600.0;
+    
+    for (entity, mut t, mut fw) in fireworks.iter_mut() {
+        fw.vel.y += gravity * dt;
+        t.translation.x += fw.vel.x * dt;
+        t.translation.y += fw.vel.y * dt;
+        
+        let life_pct = fw.life / fw.max_life;
+        t.scale = Vec3::splat(life_pct.max(0.1));
+        t.rotation = Quat::from_rotation_z(time.elapsed_secs() * 5.0);
+        
+        fw.life -= dt;
+        if fw.life <= 0.0 {
+            cmd.entity(entity).despawn();
+        }
+    }
+}
+
+fn uhoh_tick(
+    time: Res<Time>,
+    mut game: ResMut<Game>,
+    qs: Res<Questions>,
+    mut uhoh_text: Query<(&mut Visibility, &mut Transform), (With<UhOhText>, Without<Card>, Without<CardLabel>)>,
+    mut cards: Query<(&Card, &mut Transform, &mut Visibility), Without<CardLabel>>,
+    mut labels: Query<(&CardLabel, &mut Text2d, &mut Transform, &mut Visibility), Without<Card>>,
+    mut title: Query<&mut Visibility, (With<TitleText>, Without<Card>, Without<CardLabel>, Without<UhOhText>)>,
+    mut timer_vis: Query<&mut Visibility, (With<TimerDisplay>, Without<TitleText>, Without<Card>, Without<CardLabel>, Without<UhOhText>)>,
+    mut sound_events: EventWriter<PlaySoundEvent>,
+) {
+    if game.phase != Phase::UhOh {
+        for (mut vis, _) in uhoh_text.iter_mut() {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
+
+    let pulse = (time.elapsed_secs() * 10.0).sin() * 0.1 + 1.0;
+    for (mut vis, mut t) in uhoh_text.iter_mut() {
+        *vis = Visibility::Visible;
+        t.scale = Vec3::splat(pulse);
+    }
+
+    for mut v in title.iter_mut() {
+        *v = Visibility::Hidden;
+    }
+    for mut v in timer_vis.iter_mut() {
+        *v = Visibility::Hidden;
+    }
+
+    game.wait -= time.delta_secs();
+    if game.wait <= 0.0 {
+        game.question += 1;
+        if game.question >= qs.0.len() {
+            game.question = 0;
+        }
+
+        let q = &qs.0[game.question];
+        game.timer = QUESTION_TIME;
+        game.last_tick = 5;
+        game.picked = None;
+        game.phase = Phase::Playing;
+
+        for (card, mut t, mut vis) in cards.iter_mut() {
+            *vis = Visibility::Visible;
+            t.scale = Vec3::ONE;
+            t.translation.x = if card.choice == Choice::Left {
+                -CARD_GAP / 2.0
+            } else {
+                CARD_GAP / 2.0
+            };
+        }
+
+        for (lbl, mut txt, mut t, mut vis) in labels.iter_mut() {
+            *vis = Visibility::Visible;
+            t.scale = Vec3::ONE;
+            match lbl.choice {
+                Choice::Left => {
+                    txt.0 = q.left.to_string();
+                    t.translation.x = -CARD_GAP / 2.0;
+                }
+                Choice::Right => {
+                    txt.0 = q.right.to_string();
+                    t.translation.x = CARD_GAP / 2.0;
+                }
+            }
+        }
+
+        sound_events.send(PlaySoundEvent(SoundType::CardIn));
     }
 }
