@@ -613,10 +613,21 @@ fn setup(
     cmd.spawn((
         Text2d::new("UH OH! TOO SLOW!"),
         TextFont {
+            font_size: 85.0,
+            ..default()
+        },
+        TextColor(Color::BLACK),
+        Transform::from_xyz(3.0, -3.0, 24.0),
+        Visibility::Hidden,
+        UhOhText,
+    ));
+    cmd.spawn((
+        Text2d::new("UH OH! TOO SLOW!"),
+        TextFont {
             font_size: 80.0,
             ..default()
         },
-        TextColor(Color::srgba(1.0, 0.3, 0.3, 1.0)),
+        TextColor(Color::WHITE),
         Transform::from_xyz(0.0, 0.0, 25.0),
         Visibility::Hidden,
         UhOhText,
@@ -809,7 +820,8 @@ fn hover_cards(
         }
 
         let t_secs = time.elapsed_secs();
-        let progress = game.answers_count as f32 / 10.0;
+        let after_warmup = (game.answers_count as f32 - 20.0).max(0.0);
+        let progress = after_warmup / 10.0;
         let chaos = (progress + game.tremble * 2.0).min(3.0);
         let bounce_intensity = 1.0 + chaos * 4.0;
         let bounce_speed = 2.0 + chaos * 10.0;
@@ -817,8 +829,9 @@ fn hover_cards(
         let base_scale = if hovered { HOVER_SCALE } else { 1.0 };
         let pulse = 1.0 + (t_secs * (10.0 + chaos * 20.0)).sin().abs() * 0.1 * chaos;
         t.scale = t.scale.lerp(Vec3::splat(base_scale * pulse), 15.0 * time.delta_secs());
+
         let phase_offset = if card.choice == Choice::Left { 0.0 } else { std::f32::consts::PI };
-        let bob = (t_secs * bounce_speed + phase_offset).sin() * 10.0 * bounce_intensity;
+        let bob = (t_secs * bounce_speed + phase_offset).sin() * (6.0 + 4.0 * chaos);
         let side_bob = (t_secs * bounce_speed * 0.7 + phase_offset).cos() * 5.0 * chaos;
         
         let tremble_x = (t_secs * 50.0 + phase_offset).sin() * 8.0 * game.tremble;
@@ -884,11 +897,12 @@ fn click_cards(
     game.answers_count += 1;
     game.last_reaction = reaction_time;
     
-    if reaction_time < 0.5 {
-        game.tremble = (game.tremble + 0.3).min(1.0);
-    } else {
-        game.tremble = (game.tremble - 0.1).max(0.0);
-    }
+    game.tremble = match reaction_time {
+        t if t < 0.5 => (game.tremble + 0.15).min(1.5),
+        t if t < 1.0 => (game.tremble + 0.06).min(1.5),
+        t if t < 2.0 => (game.tremble + 0.02).min(1.5),
+        _ => (game.tremble - 0.1).max(0.0),
+    };
     
     let avg_reaction = game.total_reaction_time / game.answers_count as f32;
     let speed_bonus = ((QUESTION_TIME - avg_reaction) / QUESTION_TIME * 10.0) as i32;
@@ -962,7 +976,15 @@ fn picked_tick(
     game.wait -= time.delta_secs();
     if game.wait <= 0.0 {
         game.phase = Phase::Transition;
-        game.wait = 0.5;
+        let warmup = (20 - game.answers_count).max(0) as f32 / 20.0;
+        let speed_factor = if game.answers_count < 20 {
+            0.5
+        } else if game.last_reaction < 1.0 {
+            0.15
+        } else {
+            0.3
+        };
+        game.wait = speed_factor;
         sound_events.send(PlaySoundEvent(SoundType::Go));
     }
 }
@@ -1014,8 +1036,15 @@ fn transition_tick(
 
         let q = &qs.0[game.question];
         game.phase = Phase::Playing;
-        game.timer = QUESTION_TIME;
-        game.last_tick = QUESTION_TIME as i32;
+        
+        let time_pressure = if game.answers_count < 20 {
+            QUESTION_TIME
+        } else {
+            let avg_reaction = game.total_reaction_time / game.answers_count as f32;
+            (QUESTION_TIME - (avg_reaction * 0.8)).max(1.5)
+        };
+        game.timer = time_pressure;
+        game.last_tick = time_pressure.ceil() as i32;
         game.picked = None;
 
         sound_events.send(PlaySoundEvent(SoundType::CardIn));
@@ -1267,30 +1296,35 @@ fn update_visuals(
     if game.phase == Phase::Playing {
         let secs = game.timer.ceil() as i32;
         let frac = game.timer.fract();
-        let progress = game.answers_count as f32 / 20.0;
+        let intensity = ((game.answers_count as f32 - 3.0).max(0.0) / 10.0).min(2.0);
         let t_secs = time.elapsed_secs();
         
         for (mut txt, mut col, mut t) in timer_q.iter_mut() {
             txt.0 = format!("{}", secs.max(0));
 
             let bam = 1.0 - frac;
-            let scale = 0.5 + bam * 1.5;
-            let wobble = (t_secs * 8.0).sin() * 0.03 * progress;
+            let base_scale = 0.5 + bam * (1.5 + intensity * 1.5);
+            let shake = if intensity > 0.5 {
+                (t_secs * (20.0 + intensity * 40.0)).sin() * 0.1 * intensity
+            } else { 0.0 };
+            let wobble_rot = (t_secs * (10.0 + intensity * 30.0)).cos() * 0.05 * intensity;
             
             if game.timer <= HURRY_TIME {
                 col.0 = TIMER_HURRY;
-                t.scale = Vec3::splat(scale * 1.3);
+                let panic = (t_secs * 50.0).sin() * 0.2 * intensity;
+                t.scale = Vec3::splat(base_scale * (1.3 + intensity * 0.5) + panic);
+                t.rotation = Quat::from_rotation_z(wobble_rot * 2.0);
             } else {
                 col.0 = TIMER_NORMAL;
-                t.scale = Vec3::splat(scale);
+                t.scale = Vec3::splat(base_scale);
+                t.rotation = Quat::from_rotation_z(wobble_rot);
             }
-            t.rotation = Quat::from_rotation_z(wobble);
         }
 
         for (mut v, mut t) in title_q.iter_mut() {
             *v = Visibility::Visible;
-            let bounce = (t_secs * (3.0 + progress * 3.0)).sin() * 3.0 * (1.0 + progress);
-            let wobble = (t_secs * 5.0).cos() * 0.02 * progress;
+            let bounce = (t_secs * (3.0 + intensity * 3.0)).sin() * 3.0 * (1.0 + intensity);
+            let wobble = (t_secs * 5.0).cos() * 0.02 * intensity;
             t.translation.y = 280.0 + bounce;
             t.rotation = Quat::from_rotation_z(wobble);
         }
