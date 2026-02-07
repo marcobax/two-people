@@ -61,6 +61,15 @@ struct CardLabel {
 #[derive(Component)]
 struct Particle {
     vel: Vec2,
+    phase: f32,
+    spin: f32,
+}
+
+#[derive(Component)]
+struct BgShape {
+    spin_speed: f32,
+    pulse_speed: f32,
+    phase: f32,
 }
 #[derive(Component)]
 struct Pulse {
@@ -168,6 +177,7 @@ struct GameSounds {
     hover: Handle<AudioSource>,
     click: Handle<AudioSource>,
     tick: Handle<AudioSource>,
+    tick_urgent: Handle<AudioSource>,
     whoosh: Handle<AudioSource>,
     result: Handle<AudioSource>,
     select: Handle<AudioSource>,
@@ -196,6 +206,7 @@ enum SoundType {
     Hover,
     Click,
     Tick,
+    TickUrgent,
     Whoosh,
     Result,
     Select,
@@ -286,6 +297,7 @@ fn main() {
                 show_results,
                 update_visuals,
                 animate_particles,
+                animate_bg_shapes,
                 animate_pulse,
                 screen_shake,
                 handle_sound_events,
@@ -300,6 +312,7 @@ fn setup_audio(mut cmd: Commands, asset_server: Res<AssetServer>) {
         hover: asset_server.load("sounds/hover.ogg"),
         click: asset_server.load("sounds/click.ogg"),
         tick: asset_server.load("sounds/tick.ogg"),
+        tick_urgent: asset_server.load("sounds/tick_urgent.ogg"),
         whoosh: asset_server.load("sounds/whoosh.ogg"),
         result: asset_server.load("sounds/result.ogg"),
         select: asset_server.load("sounds/select.ogg"),
@@ -480,27 +493,48 @@ fn setup(
         },
     ));
 
-    // Particles
     let mut rng = rand::rng();
-    for _ in 0..40 {
+    
+    for i in 0..15 {
+        let size = rng.random_range(200.0..700.0);
+        let x = rng.random_range(-900.0..900.0);
+        let y = rng.random_range(-500.0..500.0);
+        let a = rng.random_range(0.02..0.06);
+        let hue = (i as f32 / 15.0) * 360.0;
+        let c = Color::hsla(hue, 0.6, 0.5, a);
+        let sides = [3, 4, 5, 6, 8][rng.random_range(0..5)];
+        let mesh = meshes.add(RegularPolygon::new(size, sides));
+        cmd.spawn((
+            Mesh2d(mesh),
+            MeshMaterial2d(mats.add(ColorMaterial::from(c))),
+            Transform::from_xyz(x, y, -10.0),
+            BgShape {
+                spin_speed: rng.random_range(-0.15..0.15),
+                pulse_speed: rng.random_range(0.3..0.8),
+                phase: rng.random_range(0.0..std::f32::consts::TAU),
+            },
+        ));
+    }
+
+    for _ in 0..100 {
         let x = rng.random_range(-WINDOW_WIDTH / 2.0..WINDOW_WIDTH / 2.0);
         let y = rng.random_range(-WINDOW_HEIGHT / 2.0..WINDOW_HEIGHT / 2.0);
-        let s = rng.random_range(3.0..7.0);
-        let a = rng.random_range(0.15..0.4);
-        let c = if rng.random_bool(0.5) {
-            Color::srgba(1.0, 0.4, 0.5, a)
-        } else {
-            Color::srgba(0.3, 0.6, 1.0, a)
-        };
+        let s = rng.random_range(8.0..40.0);
+        let a = rng.random_range(0.03..0.12);
+        let hue = rng.random_range(0.0..360.0);
+        let c = Color::hsla(hue, 0.5, 0.5, a);
+        let mesh = meshes.add(Circle::new(s));
         cmd.spawn((
-            Mesh2d(meshes.add(Circle::new(s))),
+            Mesh2d(mesh),
             MeshMaterial2d(mats.add(ColorMaterial::from(c))),
             Transform::from_xyz(x, y, -5.0),
             Particle {
                 vel: Vec2::new(
-                    rng.random_range(-20.0..20.0),
-                    rng.random_range(15.0..40.0),
+                    rng.random_range(-15.0..15.0),
+                    rng.random_range(8.0..25.0),
                 ),
+                phase: rng.random_range(0.0..std::f32::consts::TAU),
+                spin: rng.random_range(-0.3..0.3),
             },
         ));
     }
@@ -543,6 +577,7 @@ fn handle_sound_events(
             SoundType::Hover => sounds.hover.clone(),
             SoundType::Click => sounds.click.clone(),
             SoundType::Tick => sounds.tick.clone(),
+            SoundType::TickUrgent => sounds.tick_urgent.clone(),
             SoundType::Whoosh => sounds.whoosh.clone(),
             SoundType::Result => sounds.result.clone(),
             SoundType::Select => sounds.select.clone(),
@@ -638,12 +673,14 @@ fn timer_tick(
     }
     game.timer -= time.delta_secs();
 
-    // Check for tick sound trigger (play on each second countdown)
     let current_sec = game.timer.ceil() as i32;
     if current_sec < game.last_tick && current_sec >= 0 {
         game.last_tick = current_sec;
-        // Play tick sound for countdown
-        sound_events.send(PlaySoundEvent(SoundType::Tick));
+        if current_sec <= 2 {
+            sound_events.send(PlaySoundEvent(SoundType::TickUrgent));
+        } else {
+            sound_events.send(PlaySoundEvent(SoundType::Tick));
+        }
     }
 
     if game.timer <= 0.0 {
@@ -1081,14 +1118,35 @@ fn update_visuals(
 
 fn animate_particles(time: Res<Time>, mut particles: Query<(&mut Transform, &Particle)>) {
     let mut rng = rand::rng();
+    let t_secs = time.elapsed_secs();
+    
     for (mut t, p) in particles.iter_mut() {
         t.translation.x += p.vel.x * time.delta_secs();
         t.translation.y += p.vel.y * time.delta_secs();
+        t.rotation = Quat::from_rotation_z(t_secs * p.spin + p.phase);
+        let wobble = (t_secs * 0.5 + p.phase).sin() * 0.15;
+        t.scale = Vec3::splat(1.0 + wobble);
 
-        if t.translation.y > WINDOW_HEIGHT / 2.0 + 30.0 {
-            t.translation.y = -WINDOW_HEIGHT / 2.0 - 30.0;
+        if t.translation.y > WINDOW_HEIGHT / 2.0 + 60.0 {
+            t.translation.y = -WINDOW_HEIGHT / 2.0 - 60.0;
             t.translation.x = rng.random_range(-WINDOW_WIDTH / 2.0..WINDOW_WIDTH / 2.0);
         }
+        if t.translation.x > WINDOW_WIDTH / 2.0 + 60.0 {
+            t.translation.x = -WINDOW_WIDTH / 2.0 - 60.0;
+        }
+        if t.translation.x < -WINDOW_WIDTH / 2.0 - 60.0 {
+            t.translation.x = WINDOW_WIDTH / 2.0 + 60.0;
+        }
+    }
+}
+
+fn animate_bg_shapes(time: Res<Time>, mut shapes: Query<(&mut Transform, &BgShape)>) {
+    let t_secs = time.elapsed_secs();
+    
+    for (mut t, s) in shapes.iter_mut() {
+        t.rotation = Quat::from_rotation_z(t_secs * s.spin_speed + s.phase);
+        let pulse = 1.0 + (t_secs * s.pulse_speed + s.phase).sin() * 0.1;
+        t.scale = Vec3::splat(pulse);
     }
 }
 
