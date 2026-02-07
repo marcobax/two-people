@@ -205,7 +205,7 @@ impl Default for Questions {
             Q { title: "Drunk behavior...", left: "CLINGY\nAF", left_em: "", right: "SLEEPY\nQUIET", right_em: "", trait_name: "" },
         ];
         all.shuffle(&mut rng);
-        Self(all.into_iter().take(10).collect())
+        Self(all)
     }
 }
 
@@ -610,24 +610,26 @@ fn setup(
         StatsDisplay,
     ));
 
+    for offset in [(6.0, -6.0, 22.0), (4.0, -4.0, 23.0), (2.0, -2.0, 24.0)] {
+        cmd.spawn((
+            Text2d::new("UH OH! TOO SLOW!"),
+            TextFont {
+                font_size: 100.0,
+                ..default()
+            },
+            TextColor(Color::BLACK),
+            Transform::from_xyz(offset.0, offset.1, offset.2),
+            Visibility::Hidden,
+            UhOhText,
+        ));
+    }
     cmd.spawn((
         Text2d::new("UH OH! TOO SLOW!"),
         TextFont {
-            font_size: 85.0,
+            font_size: 100.0,
             ..default()
         },
-        TextColor(Color::BLACK),
-        Transform::from_xyz(3.0, -3.0, 24.0),
-        Visibility::Hidden,
-        UhOhText,
-    ));
-    cmd.spawn((
-        Text2d::new("UH OH! TOO SLOW!"),
-        TextFont {
-            font_size: 80.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
+        TextColor(Color::srgb(1.0, 0.9, 0.0)),
         Transform::from_xyz(0.0, 0.0, 25.0),
         Visibility::Hidden,
         UhOhText,
@@ -837,13 +839,20 @@ fn hover_cards(
         let tremble_x = (t_secs * 50.0 + phase_offset).sin() * 8.0 * game.tremble;
         let tremble_y = (t_secs * 55.0).cos() * 6.0 * game.tremble;
         
+        let urgency_factor = ((game.answers_count as f32 - 20.0).max(0.0) / 15.0).min(1.5);
+        let time_elapsed = 1.0 - (game.timer / QUESTION_TIME);
+        let urgency_shake = time_elapsed * time_elapsed * urgency_factor * 12.0;
+        let uh_oh_x = (t_secs * 45.0 + phase_offset).sin() * urgency_shake;
+        let uh_oh_y = (t_secs * 52.0).cos() * urgency_shake * 0.7;
+        
         let spin = (t_secs * bounce_speed * 0.5 + phase_offset).cos() * 0.15 * chaos;
         let panic_spin = (t_secs * 40.0).sin() * 0.1 * game.tremble;
+        let uh_oh_spin = (t_secs * 38.0).sin() * 0.04 * time_elapsed * urgency_factor;
         
         let base_x = if card.choice == Choice::Left { -CARD_GAP / 2.0 } else { CARD_GAP / 2.0 };
-        t.translation.y = card.base_y + bob + tremble_y;
-        t.translation.x = base_x + side_bob + tremble_x;
-        t.rotation = Quat::from_rotation_z(spin + panic_spin);
+        t.translation.y = card.base_y + bob + tremble_y + uh_oh_y;
+        t.translation.x = base_x + side_bob + tremble_x + uh_oh_x;
+        t.rotation = Quat::from_rotation_z(spin + panic_spin + uh_oh_spin);
     }
 
     // Detect hover change and play sound
@@ -898,9 +907,9 @@ fn click_cards(
     game.last_reaction = reaction_time;
     
     game.tremble = match reaction_time {
-        t if t < 0.5 => (game.tremble + 0.15).min(1.5),
-        t if t < 1.0 => (game.tremble + 0.06).min(1.5),
-        t if t < 2.0 => (game.tremble + 0.02).min(1.5),
+        t if t < 0.5 => (game.tremble + 0.05).min(1.5),
+        t if t < 1.0 => (game.tremble + 0.02).min(1.5),
+        t if t < 2.0 => (game.tremble + 0.008).min(1.5),
         _ => (game.tremble - 0.1).max(0.0),
     };
     
