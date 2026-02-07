@@ -79,6 +79,16 @@ struct Pulse {
 struct ReplayInstruction;
 
 #[derive(Component)]
+struct StatsDisplay;
+
+#[derive(Resource, Default)]
+struct DbStats {
+    loaded: bool,
+    total_players: i64,
+    avg_left_pct: f64,
+}
+
+#[derive(Component)]
 struct GoText;
 
 // Audio markers
@@ -99,6 +109,7 @@ struct Game {
     last_tick: i32,
     hovered_card: Option<Choice>,
     results_shown: bool,
+    timeouts: i32,
 }
 
 impl Default for Game {
@@ -115,6 +126,7 @@ impl Default for Game {
             last_tick: 5,
             hovered_card: None,
             results_shown: false,
+            timeouts: 0,
         }
     }
 }
@@ -282,6 +294,7 @@ fn main() {
         .init_resource::<Game>()
         .init_resource::<Questions>()
         .init_resource::<DbPool>()
+        .init_resource::<DbStats>()
         .insert_resource(TokioRuntime(runtime))
         .add_event::<PlaySoundEvent>()
         .add_systems(Startup, (setup, setup_audio, setup_db))
@@ -539,7 +552,6 @@ fn setup(
         ));
     }
 
-    // Instructions at bottom
     cmd.spawn((
         Text2d::new("Click a card to choose!"),
         TextFont {
@@ -549,6 +561,18 @@ fn setup(
         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)),
         Transform::from_xyz(0.0, -320.0, 10.0),
         ReplayInstruction,
+    ));
+
+    cmd.spawn((
+        Text2d::new(""),
+        TextFont {
+            font_size: 28.0,
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 1.0, 0.5, 0.9)),
+        Transform::from_xyz(0.0, -80.0, 10.0),
+        Visibility::Hidden,
+        StatsDisplay,
     ));
 
     // "GO!" text for transitions (hidden initially)
@@ -684,23 +708,27 @@ fn timer_tick(
     }
 
     if game.timer <= 0.0 {
-        // Auto-pick random when timer runs out
-        let mut rng = rand::rng();
-        game.picked = Some(if rng.random_bool(0.5) {
-            Choice::Left
+        game.timeouts += 1;
+        
+        if game.timeouts >= 3 {
+            game.phase = Phase::Results;
+            sound_events.send(PlaySoundEvent(SoundType::Result));
         } else {
-            Choice::Right
-        });
-        match game.picked {
-            Some(Choice::Left) => game.score_l += 1,
-            Some(Choice::Right) => game.score_r += 1,
-            None => {}
+            let mut rng = rand::rng();
+            game.picked = Some(if rng.random_bool(0.5) {
+                Choice::Left
+            } else {
+                Choice::Right
+            });
+            match game.picked {
+                Some(Choice::Left) => game.score_l += 1,
+                Some(Choice::Right) => game.score_r += 1,
+                None => {}
+            }
+            game.phase = Phase::Picked;
+            game.wait = 1.0;
+            sound_events.send(PlaySoundEvent(SoundType::Click));
         }
-        game.phase = Phase::Picked;
-        game.wait = 1.0;
-
-        // Play click sound for auto-pick
-        sound_events.send(PlaySoundEvent(SoundType::Click));
     }
 }
 
@@ -805,6 +833,7 @@ fn click_cards(
     
     sound_events.send(PlaySoundEvent(SoundType::Select));
     game.picked = Some(choice);
+    game.timeouts = 0;
     match choice {
         Choice::Left => game.score_l += 1,
         Choice::Right => game.score_r += 1,
@@ -950,12 +979,14 @@ fn transition_tick(
 
 fn show_results(
     mut game: ResMut<Game>,
+    mut db_stats: ResMut<DbStats>,
     mut cards: Query<&mut Transform, (With<Card>, Without<CardLabel>)>,
     mut labels: Query<&mut Transform, (With<CardLabel>, Without<Card>)>,
     mut title: Query<(&mut Text2d, &mut Visibility), (With<TitleText>, Without<CardLabel>, Without<Card>)>,
     mut result: Query<(&mut Text2d, &mut Visibility), (With<ResultDisplay>, Without<TitleText>, Without<CardLabel>, Without<Card>)>,
-    mut timer_vis: Query<&mut Visibility, (With<TimerDisplay>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>)>,
-    mut replay_text: Query<&mut Text2d, (With<ReplayInstruction>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>)>,
+    mut stats_display: Query<(&mut Text2d, &mut Visibility), (With<StatsDisplay>, Without<ResultDisplay>, Without<TitleText>, Without<CardLabel>, Without<Card>)>,
+    mut timer_vis: Query<&mut Visibility, (With<TimerDisplay>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>, Without<StatsDisplay>)>,
+    mut replay_text: Query<&mut Text2d, (With<ReplayInstruction>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>, Without<StatsDisplay>)>,
     db_pool: Res<DbPool>,
     runtime: Res<TokioRuntime>,
 ) {
@@ -977,6 +1008,8 @@ fn show_results(
     let score_l = game.score_l;
     let score_r = game.score_r;
     let result_type_owned = result_type.to_string();
+    let total = (score_l + score_r) as f64;
+    let my_left_pct = if total > 0.0 { (score_l as f64 / total) * 100.0 } else { 50.0 };
 
     runtime.0.spawn(async move {
         let lock = pool_arc.lock().await;
@@ -992,9 +1025,56 @@ fn show_results(
         }
     });
 
+    if !db_stats.loaded && score_l + score_r >= 3 {
+        let pool_arc2 = db_pool.0.clone();
+        let stats_ptr = std::ptr::addr_of_mut!(*db_stats) as usize;
+        
+        runtime.0.spawn(async move {
+            let lock = pool_arc2.lock().await;
+            if let Some(ref pool) = *lock {
+                let row: Option<(i64, f64)> = sqlx::query_as(
+                    "SELECT COUNT(*), AVG(score_left * 100.0 / (score_left + score_right)) FROM game_scores WHERE score_left + score_right >= 3"
+                )
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+                
+                if let Some((count, avg)) = row {
+                    if count >= 3 {
+                        unsafe {
+                            let stats = &mut *(stats_ptr as *mut DbStats);
+                            stats.total_players = count;
+                            stats.avg_left_pct = avg;
+                            stats.loaded = true;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let stats_text = if db_stats.loaded && db_stats.total_players >= 3 {
+        format!(
+            "{} players | Avg: {:.0}% chaotic vs {:.0}% adult\nYou: {:.0}% chaotic",
+            db_stats.total_players,
+            db_stats.avg_left_pct,
+            100.0 - db_stats.avg_left_pct,
+            my_left_pct
+        )
+    } else {
+        String::new()
+    };
+
     for (mut txt, mut vis) in result.iter_mut() {
         txt.0 = res.into();
         *vis = Visibility::Visible;
+    }
+    for (mut txt, mut vis) in stats_display.iter_mut() {
+        if !stats_text.is_empty() {
+            txt.0 = stats_text.clone();
+            *vis = Visibility::Visible;
+        }
     }
     for mut t in cards.iter_mut() {
         t.scale = Vec3::ZERO;
@@ -1022,8 +1102,9 @@ fn handle_replay(
     mut labels: Query<(&CardLabel, &mut Text2d, &mut Visibility, &mut Transform), Without<Card>>,
     mut title: Query<(&mut Text2d, &mut Visibility), (With<TitleText>, Without<CardLabel>, Without<Card>)>,
     mut result: Query<&mut Visibility, (With<ResultDisplay>, Without<TitleText>, Without<CardLabel>, Without<Card>)>,
-    mut timer_vis: Query<&mut Visibility, (With<TimerDisplay>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>)>,
-    mut replay_text: Query<&mut Text2d, (With<ReplayInstruction>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>)>,
+    mut stats_vis: Query<&mut Visibility, (With<StatsDisplay>, Without<ResultDisplay>, Without<TitleText>, Without<CardLabel>, Without<Card>)>,
+    mut timer_vis: Query<&mut Visibility, (With<TimerDisplay>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>, Without<StatsDisplay>)>,
+    mut replay_text: Query<&mut Text2d, (With<ReplayInstruction>, Without<TitleText>, Without<ResultDisplay>, Without<CardLabel>, Without<Card>, Without<StatsDisplay>)>,
     mut sound_events: EventWriter<PlaySoundEvent>,
 ) {
     if game.phase != Phase::Results {
@@ -1042,6 +1123,7 @@ fn handle_replay(
         game.last_tick = 5;
         game.hovered_card = None;
         game.results_shown = false;
+        game.timeouts = 0;
 
         sound_events.send(PlaySoundEvent(SoundType::CardIn));
 
@@ -1077,6 +1159,10 @@ fn handle_replay(
             *vis = Visibility::Hidden;
         }
 
+        for mut vis in stats_vis.iter_mut() {
+            *vis = Visibility::Hidden;
+        }
+
         for mut vis in timer_vis.iter_mut() {
             *vis = Visibility::Visible;
         }
@@ -1096,16 +1182,20 @@ fn update_visuals(
 ) {
     if game.phase == Phase::Playing {
         let secs = game.timer.ceil() as i32;
+        let frac = game.timer.fract();
+        
         for (mut txt, mut col, mut t) in timer_q.iter_mut() {
             txt.0 = format!("{}", secs.max(0));
 
+            let bam = 1.0 - frac;
+            let scale = 0.5 + bam * 1.5;
+            
             if game.timer <= HURRY_TIME {
                 col.0 = TIMER_HURRY;
-                let pulse = (game.timer * 8.0).sin() * 0.15 + 1.0;
-                t.scale = Vec3::splat(pulse);
+                t.scale = Vec3::splat(scale * 1.3);
             } else {
                 col.0 = TIMER_NORMAL;
-                t.scale = Vec3::ONE;
+                t.scale = Vec3::splat(scale);
             }
         }
 
